@@ -25,12 +25,16 @@ function experimentSummary = sdr_experiment_main(mode, configName, varargin)
 %   The function returns a struct with parameter snapshots and KPIs.
 
 arguments
-    mode (1,1) string {mustBeMember(lower(mode), ["software","tx-only","rx-process"])} = "software"
+    mode (1,1) string = "software"
     configName (1,1) string = "baseline10Mbps"
 end
 arguments (Repeating)
     varargin
 end
+
+mode = lower(string(mode));
+mode = validatestring(mode, ["software","tx-only","rx-process"]);
+configName = string(configName);
 
 opts = parseExperimentOptions(varargin{:});
 configs = buildExperimentConfigs();
@@ -46,7 +50,7 @@ syncCfg = defaultSyncSettings();
 simParams = Parameters.SimulationParameters(config.baseScenario);
 simParams = applyExperimentConfig(simParams, config);
 
-switch lower(mode)
+switch mode
     case "software"
         runMode = struct('skipChannel', false, 'skipRxProcessing', false, 'useCapture', false);
     case "tx-only"

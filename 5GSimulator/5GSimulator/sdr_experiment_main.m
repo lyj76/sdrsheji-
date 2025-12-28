@@ -72,11 +72,13 @@ parser = inputParser;
 parser.addParameter('OutputDir', 'results', @(x) ischar(x) || isstring(x));
 parser.addParameter('CaptureFile', '', @(x) ischar(x) || isstring(x));
 parser.addParameter('SaveWaveform', true, @islogical);
+parser.addParameter('EnablePlots', true, @islogical);
 parser.parse(varargin{:});
 
 opts.outputDir = char(parser.Results.OutputDir);
 opts.captureFile = char(parser.Results.CaptureFile);
 opts.saveWaveform = parser.Results.SaveWaveform;
+opts.enablePlots = parser.Results.EnablePlots;
 end
 
 %% ------------------------------------------------------------------------
@@ -304,6 +306,8 @@ experimentSummary.rxFrames = rxFrames;
 experimentSummary.downlinkResults = dlResults;
 experimentSummary.mode = runMode;
 experimentSummary.kpi = collectKpi(dlResults);
+
+reportResults(experimentSummary, opts);
 end
 
 %% ------------------------------------------------------------------------
@@ -407,4 +411,47 @@ kpi.meanThroughput = mean(throughput);
 kpi.peakThroughput = max(throughput);
 kpi.meanBer = mean(ber);
 kpi.meanFer = mean(fer);
+end
+
+%% ------------------------------------------------------------------------
+function reportResults(summary, opts)
+% Print KPI
+if ~isempty(summary.kpi.meanThroughput)
+    fprintf('KPI Summary: mean Tput=%.3f, peak Tput=%.3f, mean BER=%.3e, mean FER=%.3e\n', ...
+        summary.kpi.meanThroughput, summary.kpi.peakThroughput, summary.kpi.meanBer, summary.kpi.meanFer);
+else
+    fprintf('KPI Summary: not available (no downlink results)\n');
+end
+
+if ~opts.enablePlots
+    return;
+end
+
+ensureFolder(opts.outputDir);
+% Plot throughput/BER/FER bars if available
+if ~isempty(summary.downlinkResults)
+    tput = summary.downlinkResults.userResults.throughput.values;
+    ber = summary.downlinkResults.userResults.BERCoded.values;
+    fer = summary.downlinkResults.userResults.FER.values;
+    figure('visible','off'); bar(tput); title('Throughput per frame'); xlabel('Frame'); ylabel('Throughput'); saveas(gcf, fullfile(opts.outputDir,'throughput.png'));
+    figure('visible','off'); bar(ber); title('BER per frame'); xlabel('Frame'); ylabel('BER'); saveas(gcf, fullfile(opts.outputDir,'ber.png'));
+    figure('visible','off'); bar(fer); title('FER per frame'); xlabel('Frame'); ylabel('FER'); saveas(gcf, fullfile(opts.outputDir,'fer.png'));
+end
+
+% Waveform plots (first frame)
+if ~isempty(summary.txFrames)
+    tx = summary.txFrames{1};
+    figure('visible','off'); plot(real(tx)); title('TX waveform (real)'); xlabel('Sample'); ylabel('Amplitude'); saveas(gcf, fullfile(opts.outputDir,'tx_waveform.png'));
+end
+if ~isempty(summary.rxFrames) && ~isempty(summary.rxFrames{1})
+    rx = summary.rxFrames{1};
+    figure('visible','off'); plot(real(rx)); title('RX waveform (real)'); xlabel('Sample'); ylabel('Amplitude'); saveas(gcf, fullfile(opts.outputDir,'rx_waveform.png'));
+    % Spectrum
+    [pxx,f] = pwelch(rx(:,1),[],[],[],summary.parameters.samplingRate,'centered');
+    figure('visible','off'); plot(f/1e6,10*log10(pxx)); xlabel('Frequency (MHz)'); ylabel('PSD (dB)'); title('RX Spectrum'); saveas(gcf, fullfile(opts.outputDir,'rx_spectrum.png'));
+    % Constellation (scatter a subset)
+    nScat = min(2000, numel(rx(:,1)));
+    figure('visible','off'); scatter(real(rx(1:nScat,1)), imag(rx(1:nScat,1)), '.'); grid on;
+    xlabel('I'); ylabel('Q'); title('RX constellation (raw samples)'); saveas(gcf, fullfile(opts.outputDir,'rx_constellation.png'));
+end
 end

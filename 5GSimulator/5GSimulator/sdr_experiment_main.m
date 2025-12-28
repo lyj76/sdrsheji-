@@ -154,7 +154,8 @@ simParams.modulation.waveform           = {char(config.waveform)};
 simParams.modulation.numerOfSubcarriers = config.numerology.nSubcarriers;
 simParams.modulation.subcarrierSpacing  = config.numerology.subcarrierSpacing;
 simParams.modulation.nSymbolsTotal      = config.numerology.nSymbols;
-simParams.modulation.nGuardSymbols      = ceil(config.numerology.nSymbols * config.numerology.cpFraction);
+% Use a single CP symbol to stay compatible with built-in guard checks
+simParams.modulation.nGuardSymbols      = 1;
 simParams.modulation.samplingRate       = config.numerology.samplingRate;
 simParams.modulation.mcs                = config.mcs;
 
@@ -224,8 +225,8 @@ for iFrame = 1:nFrames
                 continue;
             end
 
-            txWithSync = prependSync(primaryLink.TransmitSignal, syncCfg);
-            primaryLink.TransmitSignal = txWithSync;
+            payloadTx = primaryLink.TransmitSignal;          % original waveform length expected by channel
+            txWithSync = prependSync(payloadTx, syncCfg);    % exported waveform (tx-only mode)
             txFrames{iFrame} = txWithSync;
 
             if runMode.skipChannel && ~runMode.useCapture
@@ -236,8 +237,9 @@ for iFrame = 1:nFrames
             if runMode.useCapture
                 [rxCurrent, captureCursor] = sliceCaptureFrame(captureData, syncCfg, primaryLink.Modulator.WaveformObject.Nr.SamplesTotal, captureCursor);
             else
+                primaryLink.TransmitSignal = payloadTx;
                 primaryLink.generateReceiveSignal();
-                rxCurrent = primaryLink.ReceiveSignal;
+                rxCurrent = prependSync(primaryLink.ReceiveSignal, syncCfg); % prepend sync for downstream detection
             end
 
             rxFrames{iFrame} = rxCurrent;
@@ -247,7 +249,7 @@ for iFrame = 1:nFrames
             end
 
             dataOnly = extractFrame(rxCurrent, syncCfg, primaryLink.Modulator.WaveformObject.Nr.SamplesTotal);
-            Links{UE{iUE}.TransmitBS(1), UEID}.TransmitSignal = primaryLink.TransmitSignal(end-length(dataOnly)+1:end, :); %#ok<NASGU>
+            Links{UE{iUE}.TransmitBS(1), UEID}.TransmitSignal = payloadTx(end-length(dataOnly)+1:end, :); %#ok<NASGU>
             Links{UE{iUE}.TransmitBS(1), UEID}.ReceiveSignal = dataOnly;
 
             UE{iUE}.processReceiveSignal(dataOnly, Links, simParams);

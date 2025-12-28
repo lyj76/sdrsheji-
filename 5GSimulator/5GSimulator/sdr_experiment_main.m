@@ -559,7 +559,8 @@ if isempty(names)
     return;
 end
 
-T = table(names', tput', ber', fer', 'VariableNames', {'Config','MeanThroughput','MeanBER','MeanFER'});
+namesStr = string(names);
+T = table(namesStr', tput', ber', fer', 'VariableNames', {'Config','MeanThroughput','MeanBER','MeanFER'});
 disp('Sweep KPI Table:'); disp(T);
 
 % Save CSV
@@ -567,12 +568,12 @@ ensureFolder(opts.outputDir);
 writetable(T, fullfile(opts.outputDir, 'sweep_kpi.csv'));
 
 % Plot throughput comparison
-figure('Name','Sweep Throughput Comparison'); bar(categorical(names), tput);
+figure('Name','Sweep Throughput Comparison'); bar(categorical(namesStr), tput);
 xlabel('Config'); ylabel('Mean Throughput'); title('Throughput comparison across configs');
 saveas(gcf, fullfile(opts.outputDir, 'sweep_throughput.png'));
 
 % Report best config
 [bestTput, idx] = max(tput);
 fprintf('Sweep best config: %s (MeanThroughput=%.3f, MeanBER=%.3e, MeanFER=%.3e)\n', ...
-    names{idx}, bestTput, ber(idx), fer(idx));
+    namesStr(idx), bestTput, ber(idx), fer(idx));
 end

@@ -66,6 +66,26 @@ end
 experimentSummary = runSoftwareChannelExperiment(simParams, config, syncCfg, runMode, opts);
 end
 
+% Sweep multiple configs if requested (executes sequentially)
+if ~isempty(opts.sweepConfigs)
+    sweepList = cellstr(opts.sweepConfigs);
+    sweepResults = cell(numel(sweepList),1);
+    for iCfg = 1:numel(sweepList)
+        cfgName = sweepList{iCfg};
+        if ~isfield(configs, cfgName)
+            warning('Sweep config "%s" not found, skipping.', cfgName);
+            continue;
+        end
+        cfg = configs.(cfgName);
+        rng(cfg.randomSeed);
+        syncCfgLocal = defaultSyncSettings();
+        simParamsLocal = Parameters.SimulationParameters(char(cfg.baseScenario));
+        simParamsLocal = applyExperimentConfig(simParamsLocal, cfg);
+        sweepResults{iCfg} = runSoftwareChannelExperiment(simParamsLocal, cfg, syncCfgLocal, runMode, opts);
+    end
+    reportSweep(sweepResults, opts);
+end
+
 %% ------------------------------------------------------------------------
 function opts = parseExperimentOptions(varargin)
 parser = inputParser;
@@ -73,12 +93,16 @@ parser.addParameter('OutputDir', 'results', @(x) ischar(x) || isstring(x));
 parser.addParameter('CaptureFile', '', @(x) ischar(x) || isstring(x));
 parser.addParameter('SaveWaveform', true, @islogical);
 parser.addParameter('EnablePlots', true, @islogical);
+parser.addParameter('SweepConfigs', {}, @(x) iscell(x) || isstring(x));
+parser.addParameter('SnrDb', [], @(x) isempty(x) || isscalar(x));
 parser.parse(varargin{:});
 
 opts.outputDir = char(parser.Results.OutputDir);
 opts.captureFile = char(parser.Results.CaptureFile);
 opts.saveWaveform = parser.Results.SaveWaveform;
 opts.enablePlots = parser.Results.EnablePlots;
+opts.sweepConfigs = parser.Results.SweepConfigs;
+opts.snrDb = parser.Results.SnrDb;
 end
 
 %% ------------------------------------------------------------------------
@@ -242,7 +266,7 @@ for iFrame = 1:nFrames
                 if runMode.skipRxProcessing
                     continue;
                 end
-                dataOnly = extractFrame(rxCurrent, syncCfg, primaryLink.Modulator.WaveformObject.Nr.SamplesTotal);
+                dataOnly = extractFrame(applyExtraNoise(rxCurrent, opts.snrDb), syncCfg, primaryLink.Modulator.WaveformObject.Nr.SamplesTotal);
                 Links{UE{iUE}.TransmitBS(1), UEID}.TransmitSignal = payloadTx(end-length(dataOnly)+1:end, :); %#ok<NASGU>
                 Links{UE{iUE}.TransmitBS(1), UEID}.ReceiveSignal = dataOnly;
                 UE{iUE}.processReceiveSignal(dataOnly, Links, simParams);
@@ -250,7 +274,7 @@ for iFrame = 1:nFrames
                 % Pure software channel: do not inject sync into the waveform; use native path
                 primaryLink.TransmitSignal = payloadTx;
                 primaryLink.generateReceiveSignal();
-                rxCurrent = primaryLink.ReceiveSignal;
+                rxCurrent = applyExtraNoise(primaryLink.ReceiveSignal, opts.snrDb);
                 rxFrames{iFrame} = rxCurrent;
                 if runMode.skipRxProcessing
                     continue;
@@ -373,6 +397,18 @@ nextCursor = startCursor + stopSample;
 end
 
 %% ------------------------------------------------------------------------
+function noisy = applyExtraNoise(signalIn, snrDb)
+if isempty(snrDb)
+    noisy = signalIn;
+    return;
+end
+sigPow = mean(abs(signalIn).^2,'all');
+noisePow = sigPow / (10^(snrDb/10));
+noise = sqrt(noisePow/2) * (randn(size(signalIn)) + 1j*randn(size(signalIn)));
+noisy = signalIn + noise;
+end
+
+%% ------------------------------------------------------------------------
 function ensureFolder(folderPath)
 if ~exist(folderPath, 'dir')
     mkdir(folderPath);
@@ -472,4 +508,39 @@ if ~isempty(summary.rxFrames) && ~isempty(summary.rxFrames{1})
     xlabel('I'); ylabel('Q'); title('RX constellation (raw samples)');
     saveas(gcf, fullfile(opts.outputDir,'rx_constellation.png'));
 end
+end
+
+%% ------------------------------------------------------------------------
+function reportSweep(results, opts)
+% Collect sweep KPIs
+names = {};
+tput = [];
+ber = [];
+fer = [];
+for i = 1:numel(results)
+    if isempty(results{i})
+        continue;
+    end
+    names{end+1} = results{i}.config.name; %#ok<AGROW>
+    tput(end+1) = results{i}.kpi.meanThroughput; %#ok<AGROW>
+    ber(end+1) = results{i}.kpi.meanBer; %#ok<AGROW>
+    fer(end+1) = results{i}.kpi.meanFer; %#ok<AGROW>
+end
+
+if isempty(names)
+    fprintf('Sweep: no valid results.\n');
+    return;
+end
+
+T = table(names', tput', ber', fer', 'VariableNames', {'Config','MeanThroughput','MeanBER','MeanFER'});
+disp('Sweep KPI Table:'); disp(T);
+
+% Save CSV
+ensureFolder(opts.outputDir);
+writetable(T, fullfile(opts.outputDir, 'sweep_kpi.csv'));
+
+% Plot throughput comparison
+figure('Name','Sweep Throughput Comparison'); bar(categorical(names), tput);
+xlabel('Config'); ylabel('Mean Throughput'); title('Throughput comparison across configs');
+saveas(gcf, fullfile(opts.outputDir, 'sweep_throughput.png'));
 end

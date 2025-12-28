@@ -166,6 +166,11 @@ simParams.simulation.pilotPattern            = char(config.pilot.pattern);
 simParams.simulation.sweepValue         = simParams.simulation.pathloss;
 simParams.phy.noisePower                = config.channel.noisePower;
 
+% Align schedule with the configured number of subcarriers (prevent mismatch)
+if isfield(simParams.schedule, 'fixedScheduleDL')
+    simParams.schedule.fixedScheduleDL{1} = sprintf('UE1:%d', simParams.modulation.numerOfSubcarriers);
+end
+
 % refresh dependent parameters after manual tweaks
 simParams.checkParameters();
 simParams.dependentParameters();

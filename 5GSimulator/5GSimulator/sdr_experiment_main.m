@@ -1,0 +1,394 @@
+function experimentSummary = sdr_experiment_main(mode, configName, varargin)
+%SDR_EXPERIMENT_MAIN End-to-end orchestration for the SDR + USRP experiment.
+%   The workflow covers:
+%     1) 软件信道（含时延扩展 + 多普勒）下的链路验证；
+%     2) 在发送端插入同步头（ZC）并导出 USRP 发送基带；
+%     3) 将接收端（软件/USRP 回放）对齐后做性能与吞吐汇总。
+%
+%   Usage examples:
+%     % 仅软件信道 + 性能统计（默认基线 10 Mbps 配置）
+%     summary = sdr_experiment_main();
+%
+%     % 生成 USRP 发送基带文件，不做接收处理
+%     sdr_experiment_main('tx-only', 'baseline10Mbps', 'OutputDir', 'results');
+%
+%     % 加载 USRP 捕获文件，进行同步与解调
+%     sdr_experiment_main('rx-process', 'baseline10Mbps', 'CaptureFile', 'capture.mat');
+%
+%   The configs encode both the 10 Mbps target and a “max throughput” sweep.
+%
+%   Parameters (Name-Value):
+%     'OutputDir'   : folder to store tx/rx artifacts (default: 'results')
+%     'CaptureFile' : MAT file that stores variable 'rxCapture' or 'rx_signal'
+%     'SaveWaveform': logical, whether to save tx waveform (default: true)
+%
+%   The function returns a struct with parameter snapshots and KPIs.
+
+arguments
+    mode (1,1) string {mustBeMember(lower(mode), ["software","tx-only","rx-process"])} = "software"
+    configName (1,1) string = "baseline10Mbps"
+end
+arguments (Repeating)
+    varargin
+end
+
+opts = parseExperimentOptions(varargin{:});
+configs = buildExperimentConfigs();
+
+if ~isfield(configs, configName)
+    error('Unknown config "%s". Available configs: %s', configName, strjoin(fieldnames(configs), ', '));
+end
+
+config = configs.(configName);
+rng(config.randomSeed);
+syncCfg = defaultSyncSettings();
+
+simParams = Parameters.SimulationParameters(config.baseScenario);
+simParams = applyExperimentConfig(simParams, config);
+
+switch lower(mode)
+    case "software"
+        runMode = struct('skipChannel', false, 'skipRxProcessing', false, 'useCapture', false);
+    case "tx-only"
+        runMode = struct('skipChannel', true, 'skipRxProcessing', true, 'useCapture', false);
+    case "rx-process"
+        if isempty(opts.captureFile)
+            error('rx-process mode requires ''CaptureFile'' to be provided.');
+        end
+        runMode = struct('skipChannel', true, 'skipRxProcessing', false, 'useCapture', true);
+end
+
+experimentSummary = runSoftwareChannelExperiment(simParams, config, syncCfg, runMode, opts);
+end
+
+%% ------------------------------------------------------------------------
+function opts = parseExperimentOptions(varargin)
+parser = inputParser;
+parser.addParameter('OutputDir', 'results', @(x) ischar(x) || isstring(x));
+parser.addParameter('CaptureFile', '', @(x) ischar(x) || isstring(x));
+parser.addParameter('SaveWaveform', true, @islogical);
+parser.parse(varargin{:});
+
+opts.outputDir = char(parser.Results.OutputDir);
+opts.captureFile = char(parser.Results.CaptureFile);
+opts.saveWaveform = parser.Results.SaveWaveform;
+end
+
+%% ------------------------------------------------------------------------
+function configs = buildExperimentConfigs()
+% Baseline: 10 MHz, 16QAM r~0.6, target >=10 Mbps
+configs.baseline10Mbps = struct( ...
+    'name',              "baseline10Mbps", ...
+    'description',       "10 MHz @ 30 kHz SCS, 16QAM r≈0.6, diamond pilots 1/6×1/4", ...
+    'baseScenario',      "LTEAcompliant", ...
+    'randomSeed',        42, ...
+    'nFrames',           10, ...
+    'numerology',        struct('subcarrierSpacing', 30e3, ...      % 30 kHz
+                                'nSubcarriers',     600, ...        % ~10 MHz payload
+                                'nSymbols',         14, ...
+                                'cpFraction',       1/8, ...
+                                'samplingRate',     30.72e6, ...
+                                'frameDuration',    1e-3), ...
+    'rf',                struct('centerFrequency', 2.6e9, ...
+                                'txPowerdBm',      30), ...
+    'channel',           struct('pdp',           "ExtendedVehicularA", ...
+                                'dopplerModel',  "Jakes", ...
+                                'userSpeed',     33.3, ...          % 120 km/h
+                                'noisePower',    14), ...
+    'mcs',               9, ...                                    % 16QAM, coding rate ≈0.6
+    'waveform',          "OFDM", ...
+    'pilot',             struct('pattern', "Diamond", 'freqSpacing', 6, 'timeSpacing', 4), ...
+    'targets',           struct('throughputMbps', 10, 'note', "Hit >=10 Mbps with robust pilots") ...
+    );
+
+% Peak throughput exploration: 20 MHz, 64QAM r≈0.87
+configs.peakThroughput = struct( ...
+    'name',              "peakThroughput", ...
+    'description',       "20 MHz @ 30 kHz SCS, 64QAM r≈0.87, sparser pilots 1/8×1/6", ...
+    'baseScenario',      "LTEAcompliant", ...
+    'randomSeed',        99, ...
+    'nFrames',           10, ...
+    'numerology',        struct('subcarrierSpacing', 30e3, ...
+                                'nSubcarriers',     1200, ...       % ~20 MHz payload
+                                'nSymbols',         14, ...
+                                'cpFraction',       1/8, ...
+                                'samplingRate',     61.44e6, ...
+                                'frameDuration',    1e-3), ...
+    'rf',                struct('centerFrequency', 3.5e9, ...
+                                'txPowerdBm',      30), ...
+    'channel',           struct('pdp',           "ExtendedVehicularA", ...
+                                'dopplerModel',  "Jakes", ...
+                                'userSpeed',     27.8, ...          % 100 km/h
+                                'noisePower',    12), ...
+    'mcs',               14, ...                                   % 64QAM high rate
+    'waveform',          "OFDM", ...
+    'pilot',             struct('pattern', "Diamond", 'freqSpacing', 8, 'timeSpacing', 6), ...
+    'targets',           struct('throughputMbps', 20, 'note', "Search peak throughput with denser bandwidth") ...
+    );
+end
+
+%% ------------------------------------------------------------------------
+function syncCfg = defaultSyncSettings()
+syncCfg.length = 255;
+syncCfg.root = 25;
+syncCfg.boostdB = 6;
+syncCfg.guardSamples = 256;
+syncCfg.sequence = zadoffChuSeq(syncCfg.root, syncCfg.length);
+syncCfg.sequence = db2mag(syncCfg.boostdB) .* syncCfg.sequence;
+end
+
+%% ------------------------------------------------------------------------
+function simParams = applyExperimentConfig(simParams, config)
+simParams.simulation.centerFrequency    = config.rf.centerFrequency;
+simParams.simulation.txPowerBaseStation = config.rf.txPowerdBm;
+simParams.simulation.txPowerUser        = config.rf.txPowerdBm;
+simParams.simulation.userVelocity       = config.channel.userSpeed;
+simParams.simulation.nFrames            = config.nFrames;
+
+simParams.modulation.waveform           = {char(config.waveform)};
+simParams.modulation.numerOfSubcarriers = config.numerology.nSubcarriers;
+simParams.modulation.subcarrierSpacing  = config.numerology.subcarrierSpacing;
+simParams.modulation.nSymbolsTotal      = config.numerology.nSymbols;
+simParams.modulation.nGuardSymbols      = ceil(config.numerology.nSymbols * config.numerology.cpFraction);
+simParams.modulation.samplingRate       = config.numerology.samplingRate;
+simParams.modulation.mcs                = config.mcs;
+
+simParams.channel.powerDelayProfile     = char(config.channel.pdp);
+simParams.channel.dopplerModel          = char(config.channel.dopplerModel);
+simParams.simulation.channelEstimationMethod = 'PilotAided';
+simParams.simulation.pilotPattern            = char(config.pilot.pattern);
+
+simParams.simulation.sweepValue         = simParams.simulation.pathloss;
+simParams.phy.noisePower                = config.channel.noisePower;
+
+% refresh dependent parameters after manual tweaks
+simParams.checkParameters();
+simParams.dependentParameters();
+end
+
+%% ------------------------------------------------------------------------
+function experimentSummary = runSoftwareChannelExperiment(simParams, config, syncCfg, runMode, opts)
+[Links, BS, UE] = Topology.getTopology(simParams);
+Links = simParams.initializeLinks(Links, BS, UE);
+
+logParameterSummary(config, simParams, syncCfg);
+
+nBS      = length(BS);
+nUE      = length(UE);
+dimLinks = length(Links);
+nFrames  = simParams.simulation.nFrames;
+
+perSweepResults = cell(dimLinks, dimLinks, nFrames);
+txFrames = cell(nFrames, 1);
+rxFrames = cell(nFrames, 1);
+
+captureData = [];
+if runMode.useCapture
+    captureData = loadCapturedWaveform(opts.captureFile);
+    captureCursor = 1;
+end
+
+for iFrame = 1:nFrames
+    % update / new channel realization
+    for iBS = 1:nBS
+        for iLink = 1:length(Links)
+            if simParams.simulation.simulateDownlink && ~isempty(Links{BS{iBS}.ID, iLink}) ...
+                    && strcmp(Links{BS{iBS}.ID, iLink}.Type, 'Primary')
+                Links{BS{iBS}.ID, iLink}.updateLink(simParams, Links, iFrame);
+            elseif simParams.simulation.simulateDownlink && ~isempty(Links{BS{iBS}.ID, iLink}) ...
+                    && strcmp(Links{BS{iBS}.ID, iLink}.Type, 'Interference')
+                Links{BS{iBS}.ID, iLink}.Channel.NewRealization(iFrame);
+            end
+        end
+    end
+
+    if simParams.simulation.simulateDownlink
+        for iBS = 1:nBS
+            BS{iBS}.generateTransmitSignal(Links);
+        end
+
+        for iUE = 1:nUE
+            UEID = UE{iUE}.ID;
+            primaryLink = Links{UE{iUE}.TransmitBS(1), UEID};
+            if ~primaryLink.isScheduled
+                continue;
+            end
+
+            txWithSync = prependSync(primaryLink.TransmitSignal, syncCfg);
+            primaryLink.TransmitSignal = txWithSync;
+            txFrames{iFrame} = txWithSync;
+
+            if runMode.skipChannel && ~runMode.useCapture
+                % For tx-only export path we stop after waveform build
+                continue;
+            end
+
+            if runMode.useCapture
+                [rxCurrent, captureCursor] = sliceCaptureFrame(captureData, syncCfg, primaryLink.Modulator.WaveformObject.Nr.SamplesTotal, captureCursor);
+            else
+                primaryLink.generateReceiveSignal();
+                rxCurrent = primaryLink.ReceiveSignal;
+            end
+
+            rxFrames{iFrame} = rxCurrent;
+
+            if runMode.skipRxProcessing
+                continue;
+            end
+
+            dataOnly = extractFrame(rxCurrent, syncCfg, primaryLink.Modulator.WaveformObject.Nr.SamplesTotal);
+            Links{UE{iUE}.TransmitBS(1), UEID}.TransmitSignal = primaryLink.TransmitSignal(end-length(dataOnly)+1:end, :); %#ok<NASGU>
+            Links{UE{iUE}.TransmitBS(1), UEID}.ReceiveSignal = dataOnly;
+
+            UE{iUE}.processReceiveSignal(dataOnly, Links, simParams);
+            primaryLink.calculateSNR(simParams.constants.BOLTZMANN, simParams.phy.temperature);
+            perSweepResults{UE{iUE}.TransmitBS(1), UEID, iFrame} = primaryLink.getResults(simParams.simulation.saveData);
+        end
+    end
+end
+
+simResults = {perSweepResults};
+if isfield(simParams.simulation, 'averageFrameDuration')
+    avgDuration = simParams.simulation.averageFrameDuration;
+else
+    avgDuration = [];
+end
+if isempty(avgDuration)
+    avgDuration = config.numerology.frameDuration;
+end
+
+if simParams.simulation.simulateDownlink
+    if runMode.skipRxProcessing
+        dlResults = [];
+    else
+        dlResults = Results.SimulationResults(nFrames, 1, nBS, nUE, avgDuration, 'downlink');
+        dlResults.collectResults(simResults, UE);
+        dlResults.postProcessResults();
+    end
+else
+    dlResults = [];
+end
+
+if opts.saveWaveform
+    ensureFolder(opts.outputDir);
+    save(fullfile(opts.outputDir, sprintf('tx_waveform_%s.mat', config.name)), ...
+        'txFrames', 'config', 'syncCfg', 'simParams', '-v7.3');
+    if ~runMode.skipChannel && ~runMode.skipRxProcessing
+        save(fullfile(opts.outputDir, sprintf('rx_waveform_%s.mat', config.name)), ...
+            'rxFrames', 'config', 'syncCfg', 'simParams', '-v7.3');
+    end
+end
+
+experimentSummary = struct();
+experimentSummary.config = config;
+experimentSummary.sync = syncCfg;
+experimentSummary.parameters = snapshotParameters(simParams);
+experimentSummary.txFrames = txFrames;
+experimentSummary.rxFrames = rxFrames;
+experimentSummary.downlinkResults = dlResults;
+experimentSummary.mode = runMode;
+experimentSummary.kpi = collectKpi(dlResults);
+end
+
+%% ------------------------------------------------------------------------
+function logParameterSummary(config, simParams, syncCfg)
+fprintf('[%s] 关键参数:\n', config.name);
+fprintf('  场景: %s | 波形: %s | MCS: %d\n', config.baseScenario, config.waveform, config.mcs);
+fprintf('  载频: %.2f GHz | 采样率: %.2f Msps | 带宽(近似): %.2f MHz\n', ...
+    simParams.simulation.centerFrequency/1e9, simParams.modulation.samplingRate/1e6, ...
+    (simParams.modulation.numerOfSubcarriers * simParams.modulation.subcarrierSpacing)/1e6);
+fprintf('  子载波间隔: %.0f kHz | 子载波数: %d | 每帧符号: %d | CP符号: %d\n', ...
+    simParams.modulation.subcarrierSpacing/1e3, simParams.modulation.numerOfSubcarriers, ...
+    simParams.modulation.nSymbolsTotal, simParams.modulation.nGuardSymbols);
+fprintf('  信道: %s | 多普勒: %s | UE速率: %.1f km/h | 噪声功率: %.1f dB\n', ...
+    simParams.channel.powerDelayProfile, simParams.channel.dopplerModel, ...
+    simParams.simulation.userVelocity*3.6, simParams.phy.noisePower);
+fprintf('  导频: %s (freq 1/%d, time 1/%d) | 同步头: ZC len=%d, boost=%ddB, guard=%d\n', ...
+    config.pilot.pattern, config.pilot.freqSpacing, config.pilot.timeSpacing, ...
+    syncCfg.length, syncCfg.boostdB, syncCfg.guardSamples);
+fprintf('  目标吞吐: >= %.1f Mbps | 备注: %s\n\n', ...
+    config.targets.throughputMbps, config.targets.note);
+end
+
+%% ------------------------------------------------------------------------
+function out = prependSync(payload, syncCfg)
+guard = zeros(syncCfg.guardSamples, size(payload, 2));
+out = [guard; syncCfg.sequence; payload];
+end
+
+%% ------------------------------------------------------------------------
+function dataOnly = extractFrame(rxSignal, syncCfg, expectedSamples)
+[corrVal, lags] = xcorr(rxSignal(:, 1), syncCfg.sequence);
+[~, peakIdx] = max(abs(corrVal));
+startSample = lags(peakIdx) + length(syncCfg.sequence) + syncCfg.guardSamples + 1;
+startSample = max(startSample, 1);
+stopSample = min(startSample + expectedSamples - 1, size(rxSignal, 1));
+dataOnly = rxSignal(startSample:stopSample, :);
+end
+
+%% ------------------------------------------------------------------------
+function captureData = loadCapturedWaveform(captureFile)
+raw = load(captureFile);
+if isfield(raw, 'rxCapture')
+    captureData = raw.rxCapture;
+elseif isfield(raw, 'rx_signal')
+    captureData = raw.rx_signal;
+elseif isfield(raw, 'rxSignal')
+    captureData = raw.rxSignal;
+else
+    error('Capture file must contain variable rxCapture / rx_signal / rxSignal.');
+end
+end
+
+%% ------------------------------------------------------------------------
+function [frame, nextCursor] = sliceCaptureFrame(captureData, syncCfg, expectedSamples, startCursor)
+dataSlice = captureData(startCursor:end, :);
+[corrVal, lags] = xcorr(dataSlice(:, 1), syncCfg.sequence);
+[~, peakIdx] = max(abs(corrVal));
+startSample = lags(peakIdx) + length(syncCfg.sequence) + syncCfg.guardSamples + 1;
+startSample = max(startSample, 1);
+stopSample = min(startSample + expectedSamples - 1, size(dataSlice, 1));
+frame = dataSlice(startSample:stopSample, :);
+nextCursor = startCursor + stopSample;
+end
+
+%% ------------------------------------------------------------------------
+function ensureFolder(folderPath)
+if ~exist(folderPath, 'dir')
+    mkdir(folderPath);
+end
+end
+
+%% ------------------------------------------------------------------------
+function paramSnap = snapshotParameters(simParams)
+paramSnap = struct();
+paramSnap.centerFrequency = simParams.simulation.centerFrequency;
+paramSnap.bandwidthHz = simParams.modulation.numerOfSubcarriers * simParams.modulation.subcarrierSpacing;
+paramSnap.samplingRate = simParams.modulation.samplingRate;
+paramSnap.subcarrierSpacing = simParams.modulation.subcarrierSpacing;
+paramSnap.nSubcarriers = simParams.modulation.numerOfSubcarriers;
+paramSnap.nSymbols = simParams.modulation.nSymbolsTotal;
+paramSnap.cpSymbols = simParams.modulation.nGuardSymbols;
+paramSnap.waveform = simParams.modulation.waveform;
+paramSnap.mcsIndex = simParams.modulation.mcs;
+paramSnap.channel = simParams.channel;
+paramSnap.txPowerBaseStation = simParams.simulation.txPowerBaseStation;
+paramSnap.pilotPattern = simParams.simulation.pilotPattern;
+end
+
+%% ------------------------------------------------------------------------
+function kpi = collectKpi(dlResults)
+if isempty(dlResults)
+    kpi = struct('throughput', [], 'ber', [], 'fer', []);
+    return;
+end
+throughput = dlResults.userResults.throughput.values;
+ber = dlResults.userResults.BERCoded.values;
+fer = dlResults.userResults.FER.values;
+
+kpi = struct();
+kpi.meanThroughput = mean(throughput);
+kpi.peakThroughput = max(throughput);
+kpi.meanBer = mean(ber);
+kpi.meanFer = mean(fer);
+end

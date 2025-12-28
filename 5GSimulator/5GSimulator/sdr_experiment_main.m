@@ -134,7 +134,7 @@ end
 %% ------------------------------------------------------------------------
 function syncCfg = defaultSyncSettings()
 syncCfg.length = 255;
-syncCfg.root = 25;
+syncCfg.root = 23; % choose a root that is coprime with the length to satisfy ZC constraints
 syncCfg.boostdB = 6;
 syncCfg.guardSamples = 256;
 syncCfg.sequence = zadoffChuSeq(syncCfg.root, syncCfg.length);

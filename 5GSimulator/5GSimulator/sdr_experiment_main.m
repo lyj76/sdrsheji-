@@ -226,7 +226,7 @@ for iFrame = 1:nFrames
             end
 
             payloadTx = primaryLink.TransmitSignal;          % original waveform length expected by channel
-            txWithSync = prependSync(payloadTx, syncCfg);    % exported waveform (tx-only mode)
+            txWithSync = prependSync(payloadTx, syncCfg);    % exported waveform (tx-only / capture)
             txFrames{iFrame} = txWithSync;
 
             if runMode.skipChannel && ~runMode.useCapture
@@ -236,23 +236,27 @@ for iFrame = 1:nFrames
 
             if runMode.useCapture
                 [rxCurrent, captureCursor] = sliceCaptureFrame(captureData, syncCfg, primaryLink.Modulator.WaveformObject.Nr.SamplesTotal, captureCursor);
+                rxFrames{iFrame} = rxCurrent;
+                if runMode.skipRxProcessing
+                    continue;
+                end
+                dataOnly = extractFrame(rxCurrent, syncCfg, primaryLink.Modulator.WaveformObject.Nr.SamplesTotal);
+                Links{UE{iUE}.TransmitBS(1), UEID}.TransmitSignal = payloadTx(end-length(dataOnly)+1:end, :); %#ok<NASGU>
+                Links{UE{iUE}.TransmitBS(1), UEID}.ReceiveSignal = dataOnly;
+                UE{iUE}.processReceiveSignal(dataOnly, Links, simParams);
             else
+                % Pure software channel: do not inject sync into the waveform; use native path
                 primaryLink.TransmitSignal = payloadTx;
                 primaryLink.generateReceiveSignal();
-                rxCurrent = prependSync(primaryLink.ReceiveSignal, syncCfg); % prepend sync for downstream detection
+                rxCurrent = primaryLink.ReceiveSignal;
+                rxFrames{iFrame} = rxCurrent;
+                if runMode.skipRxProcessing
+                    continue;
+                end
+                Links{UE{iUE}.TransmitBS(1), UEID}.TransmitSignal = payloadTx; %#ok<NASGU>
+                Links{UE{iUE}.TransmitBS(1), UEID}.ReceiveSignal = rxCurrent;
+                UE{iUE}.processReceiveSignal(rxCurrent, Links, simParams);
             end
-
-            rxFrames{iFrame} = rxCurrent;
-
-            if runMode.skipRxProcessing
-                continue;
-            end
-
-            dataOnly = extractFrame(rxCurrent, syncCfg, primaryLink.Modulator.WaveformObject.Nr.SamplesTotal);
-            Links{UE{iUE}.TransmitBS(1), UEID}.TransmitSignal = payloadTx(end-length(dataOnly)+1:end, :); %#ok<NASGU>
-            Links{UE{iUE}.TransmitBS(1), UEID}.ReceiveSignal = dataOnly;
-
-            UE{iUE}.processReceiveSignal(dataOnly, Links, simParams);
             primaryLink.calculateSNR(simParams.constants.BOLTZMANN, simParams.phy.temperature);
             perSweepResults{UE{iUE}.TransmitBS(1), UEID, iFrame} = primaryLink.getResults(simParams.simulation.saveData);
         end

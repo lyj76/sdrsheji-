@@ -47,7 +47,8 @@ config = configs.(configName);
 rng(config.randomSeed);
 syncCfg = defaultSyncSettings();
 
-simParams = Parameters.SimulationParameters(config.baseScenario);
+% Ensure scenario name is char for older MATLAB versions
+simParams = Parameters.SimulationParameters(char(config.baseScenario));
 simParams = applyExperimentConfig(simParams, config);
 
 switch mode

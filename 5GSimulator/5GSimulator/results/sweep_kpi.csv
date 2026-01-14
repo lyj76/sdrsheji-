@@ -1,0 +1,4 @@
+Config,MeanThroughput,MeanBER,MeanFER
+baseline10Mbps,38122022.4562382,0,0
+peakThroughput,0,0.0815848229030425,1
+wide256QAM,0,0.117969146719431,1
